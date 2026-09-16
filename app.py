@@ -261,18 +261,6 @@ if "chunk_count" not in st.session_state:
     st.session_state["chunk_count"] = 0
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pinned input bar at the very bottom of the app
-# ─────────────────────────────────────────────────────────────────────────────
-with st.bottom:
-    query = st.chat_input(
-        "Ask something about your documents…" if st.session_state["indexed"] else "Build a knowledge base first…",
-        disabled=not st.session_state["indexed"],
-    )
-
-if query:
-    st.session_state["messages"].append({"role": "user", "content": query})
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Layout: left = knowledge base controls, right = chat
 # ─────────────────────────────────────────────────────────────────────────────
 left, right = st.columns([1, 2], gap="large")
@@ -325,6 +313,21 @@ with left:
             <span class="dm-stat-value">{st.session_state["chunk_count"]}</span></div>
     """, unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pinned input bar — captured AFTER the left column so "indexed" is fresh,
+# and laid out with the same [1, 2] ratio so it aligns under the right column
+# ─────────────────────────────────────────────────────────────────────────────
+with st.bottom:
+    _, input_col = st.columns([1, 2], gap="large")
+    with input_col:
+        query = st.chat_input(
+            "Ask something about your documents…" if st.session_state["indexed"] else "Build a knowledge base first…",
+            disabled=not st.session_state["indexed"],
+        )
+
+if query:
+    st.session_state["messages"].append({"role": "user", "content": query})
 
 with right:
     chat_container = st.container(height=560, border=False)
