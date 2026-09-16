@@ -116,6 +116,47 @@ st.markdown("""
         border: 1px solid rgba(255,255,255,0.08);
         color: #e8e9f3;
         border-bottom-left-radius: 4px;
+        transition: border-color 260ms ease, box-shadow 260ms ease, background 260ms ease;
+    }
+    /* Soft blue glow on hover — answers only, not the thinking bubble */
+    .dm-bubble.assistant:not(.dm-thinking):hover {
+        border-color: rgba(50,150,255,0.6);
+        box-shadow: 0 0 12px rgba(50,150,255,0.18), 0 0 25px rgba(50,150,255,0.08);
+        background: rgba(255,255,255,0.075);
+    }
+
+    /* Entrance animations — applied once, only to a message the first time it
+       is rendered (see `animated_count` in the render loop). */
+    .dm-msg-row.dm-enter-user {
+        animation: dm-rise-user 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+    .dm-msg-row.dm-enter-assistant {
+        animation: dm-rise-assistant 560ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+    @keyframes dm-rise-user {
+        from { opacity: 0; transform: translateY(20px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes dm-rise-assistant {
+        from { opacity: 0; transform: translateY(18px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+    .dm-msg-row.dm-enter-assistant .dm-bubble.assistant {
+        animation: dm-glow-settle 900ms ease-out 1;
+    }
+    @keyframes dm-glow-settle {
+        0%   { box-shadow: 0 0 18px rgba(50,150,255,0.16); }
+        100% { box-shadow: 0 0 0 rgba(50,150,255,0); }
+    }
+    /* The thinking bubble fades in too, so the hand-off reads smoothly */
+    .dm-msg-row.dm-enter-thinking {
+        animation: dm-rise-assistant 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .dm-msg-row.dm-enter-user,
+        .dm-msg-row.dm-enter-assistant,
+        .dm-msg-row.dm-enter-thinking,
+        .dm-msg-row.dm-enter-assistant .dm-bubble.assistant { animation: none; }
     }
     .dm-avatar {
         width: 30px; height: 30px; border-radius: 9px;
@@ -278,14 +319,18 @@ if "chunk_count" not in st.session_state:
 # Question waiting to be answered. Set on submit, cleared once the answer lands.
 if "pending" not in st.session_state:
     st.session_state["pending"] = None
+# UI-only: how many messages have already played their entrance animation.
+if "animated_count" not in st.session_state:
+    st.session_state["animated_count"] = 0
 
 
-def render_message(role: str, content: str) -> str:
+def render_message(role: str, content: str, animate: bool = False) -> str:
     """Escape user/model text and keep line breaks, then wrap it in a bubble."""
     avatar = "🧑" if role == "user" else "🧠"
     safe = _html.escape(str(content)).replace("\n", "<br>")
+    enter = f" dm-enter-{role}" if animate else ""
     return f"""
-    <div class="dm-msg-row {role}">
+    <div class="dm-msg-row {role}{enter}">
         <div class="dm-avatar {role}">{avatar}</div>
         <div class="dm-bubble {role}">{safe}</div>
     </div>
@@ -387,12 +432,19 @@ with right:
             </div>
             """, unsafe_allow_html=True)
         else:
-            for msg in st.session_state["messages"]:
-                st.markdown(render_message(msg["role"], msg["content"]), unsafe_allow_html=True)
+            # Only messages that haven't been painted before get the entrance
+            # animation; everything older renders static on every rerun.
+            first_new = st.session_state["animated_count"]
+            for i, msg in enumerate(st.session_state["messages"]):
+                st.markdown(
+                    render_message(msg["role"], msg["content"], animate=i >= first_new),
+                    unsafe_allow_html=True,
+                )
+            st.session_state["animated_count"] = len(st.session_state["messages"])
 
         if is_busy:
             st.markdown("""
-            <div class="dm-msg-row assistant">
+            <div class="dm-msg-row assistant dm-enter-thinking">
                 <div class="dm-avatar assistant">🧠</div>
                 <div class="dm-bubble assistant dm-thinking">
                     <span class="dm-dot"></span><span class="dm-dot"></span><span class="dm-dot"></span>
