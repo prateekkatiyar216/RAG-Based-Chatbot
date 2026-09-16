@@ -3,6 +3,8 @@ import streamlit.components.v1 as components
 import os
 import html as _html
 import tempfile
+import markdown as _markdown
+from html.parser import HTMLParser
 from src.data_loader import load_all_documents
 from src.vectorstore import FaissVectorStore
 from src.search import RAGSearch
@@ -117,6 +119,8 @@ st.markdown("""
         color: #e8e9f3;
         border-bottom-left-radius: 4px;
         transition: border-color 260ms ease, box-shadow 260ms ease, background 260ms ease;
+        max-width: 92%;
+        min-width: 0;   /* let the table wrapper below shrink instead of overflowing */
     }
     /* Soft blue glow on hover — answers only, not the thinking bubble */
     .dm-bubble.assistant:not(.dm-thinking):hover {
@@ -173,6 +177,104 @@ st.markdown("""
         padding: 1px 5px; border-radius: 5px;
         font-size: 0.86em;
     }
+
+    /* ── Rendered Markdown inside assistant answers ──────────────────── */
+    .dm-bubble.assistant :first-child { margin-top: 0; }
+    .dm-bubble.assistant :last-child { margin-bottom: 0; }
+    .dm-bubble.assistant strong { color: #f4f4fb; font-weight: 600; }
+    .dm-bubble.assistant em { color: inherit; }
+    .dm-bubble.assistant h1, .dm-bubble.assistant h2, .dm-bubble.assistant h3,
+    .dm-bubble.assistant h4, .dm-bubble.assistant h5, .dm-bubble.assistant h6 {
+        font-family: 'Space Grotesk', sans-serif;
+        color: #f4f4fb;
+        font-weight: 600;
+        line-height: 1.3;
+        margin: 14px 0 6px 0;
+    }
+    .dm-bubble.assistant h1 { font-size: 1.25rem; }
+    .dm-bubble.assistant h2 { font-size: 1.12rem; }
+    .dm-bubble.assistant h3 { font-size: 1.02rem; }
+    .dm-bubble.assistant h4, .dm-bubble.assistant h5, .dm-bubble.assistant h6 { font-size: 0.94rem; }
+    .dm-bubble.assistant ul, .dm-bubble.assistant ol {
+        margin: 6px 0 10px 0;
+        padding-left: 1.35em;
+    }
+    .dm-bubble.assistant li { margin: 3px 0; }
+    .dm-bubble.assistant li > ul, .dm-bubble.assistant li > ol { margin: 3px 0 3px 0; }
+    .dm-bubble.assistant blockquote {
+        margin: 8px 0;
+        padding: 4px 12px;
+        border-left: 3px solid rgba(124,92,255,0.5);
+        color: #b7bad4;
+    }
+    .dm-bubble.assistant hr {
+        border: none;
+        border-top: 1px solid rgba(255,255,255,0.1);
+        margin: 12px 0;
+    }
+    .dm-bubble.assistant pre {
+        background: rgba(0,0,0,0.35);
+        border: 1px solid rgba(255,255,255,0.07);
+        border-radius: 10px;
+        padding: 12px 14px;
+        margin: 10px 0;
+        overflow-x: auto;
+        max-width: 100%;
+    }
+    .dm-bubble.assistant pre code {
+        background: none;
+        padding: 0;
+        font-size: 0.85em;
+        white-space: pre;
+        color: #d8dcf5;
+    }
+
+    /* Markdown tables — kept inside a horizontally scrollable wrapper so a
+       wide table never pushes the bubble or the page sideways. */
+    .dm-table-wrapper {
+        width: 100%;
+        max-width: 100%;
+        overflow-x: auto;
+        margin: 12px 0;
+        border-radius: 12px;
+        overscroll-behavior-x: contain;
+    }
+    .dm-table-wrapper::-webkit-scrollbar { height: 7px; }
+    .dm-table-wrapper::-webkit-scrollbar-thumb {
+        background: rgba(255,255,255,0.14); border-radius: 8px;
+    }
+    .dm-table-wrapper::-webkit-scrollbar-track { background: transparent; }
+
+    .dm-markdown-table {
+        width: 100%;
+        min-width: 320px;
+        border-collapse: separate;
+        border-spacing: 0;
+        background: rgba(255,255,255,0.035);
+        border: 1px solid rgba(255,255,255,0.09);
+        border-radius: 12px;
+        overflow: hidden;
+        font-size: 0.88rem;
+    }
+    .dm-markdown-table th, .dm-markdown-table td {
+        padding: 9px 13px;
+        text-align: left;
+        vertical-align: top;
+        border-bottom: 1px solid rgba(255,255,255,0.07);
+        white-space: normal;
+        word-break: break-word;
+    }
+    .dm-markdown-table th {
+        background: rgba(124,92,255,0.14);
+        color: #d9d5ff;
+        font-weight: 600;
+        font-family: 'Space Grotesk', sans-serif;
+        font-size: 0.82rem;
+        letter-spacing: 0.2px;
+        white-space: nowrap;
+    }
+    .dm-markdown-table tbody tr:last-child td { border-bottom: none; }
+    .dm-markdown-table tbody tr:hover td { background: rgba(255,255,255,0.03); }
 
     /* ── Chat transcript area ────────────────────────────────────────────
        The container is created with a fixed pixel height by Streamlit; these
@@ -351,15 +453,123 @@ if "animated_count" not in st.session_state:
     st.session_state["animated_count"] = 0
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Safe Markdown rendering for assistant answers.
+#
+# The RAG answer is plain text that may contain Markdown (tables, bold,
+# headings, lists, code). We convert it to HTML with python-markdown, then
+# run the result through an allowlist sanitizer before it ever reaches
+# `unsafe_allow_html=True` — so any raw HTML/script the model's output
+# happens to contain (accidentally or via a crafted document) is stripped,
+# not executed. User messages are never Markdown-rendered; they stay
+# plain-escaped text, as before.
+# ─────────────────────────────────────────────────────────────────────────────
+_MD_ALLOWED_TAGS = {
+    "p", "br", "strong", "b", "em", "i", "u",
+    "ul", "ol", "li",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "code", "pre", "blockquote", "hr",
+    "table", "thead", "tbody", "tr", "th", "td",
+}
+_MD_VOID_TAGS = {"br", "hr"}
+# Tags whose entire content (not just the tag) must never reach the page.
+_MD_DROP_CONTENT_TAGS = {
+    "script", "style", "iframe", "object", "embed", "form",
+    "input", "button", "select", "textarea", "link", "meta", "svg", "noscript",
+}
+
+
+class _SafeMarkdownHTML(HTMLParser):
+    """Allowlist HTML sanitizer for python-markdown output.
+
+    Any tag not in `_MD_ALLOWED_TAGS` is dropped (its text content is kept,
+    re-escaped); any tag in `_MD_DROP_CONTENT_TAGS` is dropped along with
+    everything inside it. No attributes are ever passed through — the one
+    exception is that a `<table>` is given a fixed `class` and wrapped in a
+    `.dm-table-wrapper` div so wide tables scroll instead of breaking the
+    chat layout.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out = []
+        self._drop_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in _MD_DROP_CONTENT_TAGS:
+            self._drop_depth += 1
+            return
+        if self._drop_depth:
+            return
+        if tag not in _MD_ALLOWED_TAGS:
+            return
+        if tag == "table":
+            self.out.append('<div class="dm-table-wrapper"><table class="dm-markdown-table">')
+            return
+        self.out.append(f"<{tag}>")
+
+    def handle_startendtag(self, tag, attrs):
+        tag = tag.lower()
+        if self._drop_depth or tag in _MD_DROP_CONTENT_TAGS:
+            return
+        if tag in _MD_ALLOWED_TAGS:
+            self.out.append(f"<{tag}/>")
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in _MD_DROP_CONTENT_TAGS:
+            if self._drop_depth:
+                self._drop_depth -= 1
+            return
+        if self._drop_depth:
+            return
+        if tag not in _MD_ALLOWED_TAGS or tag in _MD_VOID_TAGS:
+            return
+        if tag == "table":
+            self.out.append("</table></div>")
+            return
+        self.out.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if self._drop_depth:
+            return
+        self.out.append(_html.escape(data))
+
+    def get_html(self) -> str:
+        return "".join(self.out)
+
+
+def markdown_to_safe_html(text: str) -> str:
+    """Render assistant Markdown (tables, bold, headings, lists, code) to
+    sanitized HTML. Never raises — falls back to plain escaped text."""
+    try:
+        raw_html = _markdown.markdown(
+            str(text),
+            extensions=["tables", "fenced_code", "sane_lists"],
+            output_format="html5",
+        )
+        parser = _SafeMarkdownHTML()
+        parser.feed(raw_html)
+        parser.close()
+        return parser.get_html()
+    except Exception:
+        return _html.escape(str(text)).replace("\n", "<br>")
+
+
 def render_message(role: str, content: str, animate: bool = False) -> str:
-    """Escape user/model text and keep line breaks, then wrap it in a bubble."""
+    """Render a chat bubble. Assistant text is rendered as sanitized
+    Markdown; user text stays plain-escaped (never Markdown-rendered)."""
     avatar = "🧑" if role == "user" else "🧠"
-    safe = _html.escape(str(content)).replace("\n", "<br>")
     enter = f" dm-enter-{role}" if animate else ""
+    if role == "assistant":
+        body = markdown_to_safe_html(content)
+    else:
+        body = _html.escape(str(content)).replace("\n", "<br>")
     return f"""
     <div class="dm-msg-row {role}{enter}">
         <div class="dm-avatar {role}">{avatar}</div>
-        <div class="dm-bubble {role}">{safe}</div>
+        <div class="dm-bubble {role}">{body}</div>
     </div>
     """
 
