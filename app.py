@@ -1,5 +1,7 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import os
+import html as _html
 import tempfile
 from src.data_loader import load_all_documents
 from src.vectorstore import FaissVectorStore
@@ -122,6 +124,20 @@ st.markdown("""
     }
     .dm-avatar.user { background: rgba(124,92,255,0.25); margin-left: 10px; order: 2; }
     .dm-avatar.assistant { background: rgba(34,211,238,0.18); margin-right: 10px; }
+
+    .dm-bubble p { margin: 0 0 8px 0; }
+    .dm-bubble p:last-child { margin-bottom: 0; }
+    .dm-bubble code {
+        background: rgba(0,0,0,0.35);
+        padding: 1px 5px; border-radius: 5px;
+        font-size: 0.86em;
+    }
+
+    /* Chat scroll area */
+    [data-testid="stVerticalBlockBorderWrapper"] > div::-webkit-scrollbar { width: 8px; }
+    [data-testid="stVerticalBlockBorderWrapper"] > div::-webkit-scrollbar-thumb {
+        background: rgba(255,255,255,0.12); border-radius: 8px;
+    }
 
     /* Thinking indicator */
     .dm-bubble.dm-thinking {
@@ -259,6 +275,21 @@ if "doc_names" not in st.session_state:
     st.session_state["doc_names"] = []
 if "chunk_count" not in st.session_state:
     st.session_state["chunk_count"] = 0
+# Question waiting to be answered. Set on submit, cleared once the answer lands.
+if "pending" not in st.session_state:
+    st.session_state["pending"] = None
+
+
+def render_message(role: str, content: str) -> str:
+    """Escape user/model text and keep line breaks, then wrap it in a bubble."""
+    avatar = "🧑" if role == "user" else "🧠"
+    safe = _html.escape(str(content)).replace("\n", "<br>")
+    return f"""
+    <div class="dm-msg-row {role}">
+        <div class="dm-avatar {role}">{avatar}</div>
+        <div class="dm-bubble {role}">{safe}</div>
+    </div>
+    """
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layout: left = knowledge base controls, right = chat
@@ -318,17 +349,32 @@ with left:
 # Pinned input bar — captured AFTER the left column so "indexed" is fresh,
 # and laid out with the same [1, 2] ratio so it aligns under the right column
 # ─────────────────────────────────────────────────────────────────────────────
+is_busy = st.session_state["pending"] is not None
+
 with st.bottom:
     _, input_col = st.columns([1, 2], gap="large")
     with input_col:
+        if not st.session_state["indexed"]:
+            placeholder = "Build a knowledge base first…"
+        elif is_busy:
+            placeholder = "Thinking…"
+        else:
+            placeholder = "Ask something about your documents…"
+
         query = st.chat_input(
-            "Ask something about your documents…" if st.session_state["indexed"] else "Build a knowledge base first…",
-            disabled=not st.session_state["indexed"],
+            placeholder,
+            disabled=not st.session_state["indexed"] or is_busy,
         )
 
-if query:
+# Step 1 — a question was just submitted: store it and rerun immediately so the
+# bubble + thinking dots are painted BEFORE the slow retrieval call starts.
+if query and not is_busy:
     st.session_state["messages"].append({"role": "user", "content": query})
+    st.session_state["pending"] = query
+    st.rerun()
 
+# Step 2 — paint the transcript (this run either shows history, or history +
+# the pending question with the animated dots underneath it).
 with right:
     chat_container = st.container(height=560, border=False)
 
@@ -342,16 +388,9 @@ with right:
             """, unsafe_allow_html=True)
         else:
             for msg in st.session_state["messages"]:
-                role = msg["role"]
-                avatar = "🧑" if role == "user" else "🧠"
-                st.markdown(f"""
-                <div class="dm-msg-row {role}">
-                    <div class="dm-avatar {role}">{avatar}</div>
-                    <div class="dm-bubble {role}">{msg["content"]}</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(render_message(msg["role"], msg["content"]), unsafe_allow_html=True)
 
-        if query:
+        if is_busy:
             st.markdown("""
             <div class="dm-msg-row assistant">
                 <div class="dm-avatar assistant">🧠</div>
@@ -361,15 +400,34 @@ with right:
             </div>
             """, unsafe_allow_html=True)
 
-    if query:
-        try:
-            rag = RAGSearch(persist_dir=PERSIST_DIR)
-            rag.vectorstore.load()
-            answer = rag.search_and_summarize(query, top_k=top_k)
-        except EnvironmentError as e:
-            answer = f"⚠️ Setup issue: {e}"
-        except Exception as e:
-            answer = f"⚠️ Something went wrong: {e}"
+        # Keep the newest message in view.
+        components.html(
+            """
+            <script>
+                const scroller = window.parent.document.querySelectorAll(
+                    '[data-testid="stVerticalBlockBorderWrapper"] > div'
+                );
+                scroller.forEach(el => {
+                    if (el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight;
+                });
+            </script>
+            """,
+            height=0,
+        )
 
-        st.session_state["messages"].append({"role": "assistant", "content": answer})
-        st.rerun()
+# Step 3 — now that the UI is on screen, run retrieval, then rerun once more so
+# the answer replaces the dots.
+if is_busy:
+    pending_query = st.session_state["pending"]
+    try:
+        rag = RAGSearch(persist_dir=PERSIST_DIR)
+        rag.vectorstore.load()
+        answer = rag.search_and_summarize(pending_query, top_k=top_k)
+    except EnvironmentError as e:
+        answer = f"⚠️ Setup issue: {e}"
+    except Exception as e:
+        answer = f"⚠️ Something went wrong: {e}"
+
+    st.session_state["messages"].append({"role": "assistant", "content": answer})
+    st.session_state["pending"] = None
+    st.rerun()
