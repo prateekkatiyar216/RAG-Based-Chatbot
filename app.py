@@ -174,10 +174,37 @@ st.markdown("""
         font-size: 0.86em;
     }
 
-    /* Chat scroll area */
-    [data-testid="stVerticalBlockBorderWrapper"] > div::-webkit-scrollbar { width: 8px; }
-    [data-testid="stVerticalBlockBorderWrapper"] > div::-webkit-scrollbar-thumb {
+    /* ── Chat transcript area ────────────────────────────────────────────
+       The container is created with a fixed pixel height by Streamlit; these
+       rules relax it so it grows with the conversation and only starts
+       scrolling once it would outgrow the viewport. `.dm-chat-marker` is an
+       empty element rendered as the first child of the chat container, so
+       :has() lets us target that one container and nothing else. */
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.dm-chat-marker) {
+        height: auto !important;
+        min-height: 260px;
+        max-height: calc(100vh - 250px) !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.dm-chat-marker) > div {
+        max-height: calc(100vh - 250px);
+        overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior: contain;   /* don't hand scrolling to the page */
+        padding-right: 6px;
+    }
+    /* Fallback for browsers without :has() — keeps the old fixed-height behaviour */
+    @supports not selector(:has(*)) {
+        [data-testid="stVerticalBlockBorderWrapper"] > div { overscroll-behavior: contain; }
+    }
+    .dm-chat-marker { height: 0; margin: 0; }
+    #dm-chat-end { height: 1px; margin: 0; }
+
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.dm-chat-marker) > div::-webkit-scrollbar { width: 8px; }
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.dm-chat-marker) > div::-webkit-scrollbar-thumb {
         background: rgba(255,255,255,0.12); border-radius: 8px;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.dm-chat-marker) > div::-webkit-scrollbar-track {
+        background: transparent;
     }
 
     /* Thinking indicator */
@@ -421,9 +448,14 @@ if query and not is_busy:
 # Step 2 — paint the transcript (this run either shows history, or history +
 # the pending question with the animated dots underneath it).
 with right:
-    chat_container = st.container(height=560, border=False)
+    # Height is a ceiling, not a fixed box: the CSS above turns it into
+    # "grow with the content, cap at the viewport, then scroll".
+    chat_container = st.container(height=700, border=False)
 
     with chat_container:
+        # Unique marker so the CSS/JS can identify THIS container only.
+        st.markdown('<div class="dm-chat-marker"></div>', unsafe_allow_html=True)
+
         if not st.session_state["messages"]:
             st.markdown("""
             <div class="dm-empty">
@@ -452,16 +484,67 @@ with right:
             </div>
             """, unsafe_allow_html=True)
 
-        # Keep the newest message in view.
+        # End-of-transcript anchor. The scroll script starts here and walks up
+        # to find the real scrollable element, so nothing else on the page moves.
+        st.markdown('<div id="dm-chat-end"></div>', unsafe_allow_html=True)
+
+        # Token changes only when a message is added or the thinking state
+        # flips, so unrelated reruns (slider, upload) never trigger a scroll.
+        _scroll_token = f"{len(st.session_state['messages'])}-{int(is_busy)}"
         components.html(
-            """
+            f"""
             <script>
-                const scroller = window.parent.document.querySelectorAll(
-                    '[data-testid="stVerticalBlockBorderWrapper"] > div'
-                );
-                scroller.forEach(el => {
-                    if (el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight;
-                });
+            (function () {{
+                const token = "{_scroll_token}";
+                const doc = window.parent.document;
+                const win = window.parent;
+                if (win.__dmScrollToken === token) return;
+
+                function findScroller(el) {{
+                    let node = el.parentElement;
+                    while (node && node !== doc.body) {{
+                        const oy = win.getComputedStyle(node).overflowY;
+                        if ((oy === "auto" || oy === "scroll") &&
+                            node.scrollHeight > node.clientHeight + 4) return node;
+                        node = node.parentElement;
+                    }}
+                    return null;
+                }}
+
+                function scrollOnce() {{
+                    const anchor = doc.getElementById("dm-chat-end");
+                    if (!anchor) return false;
+                    const scroller = findScroller(anchor);
+                    if (!scroller) return true;   // everything already fits
+
+                    const rows = scroller.querySelectorAll(".dm-msg-row");
+                    const last = rows[rows.length - 1];
+                    let top = scroller.scrollHeight;
+
+                    // A very tall answer: line its TOP up instead of jumping to
+                    // the end, so the beginning of the answer is what you see.
+                    if (last && last.offsetHeight > scroller.clientHeight * 0.85) {{
+                        const delta = last.getBoundingClientRect().top
+                                    - scroller.getBoundingClientRect().top;
+                        top = scroller.scrollTop + delta - 12;
+                    }}
+                    scroller.scrollTo({{ top: top, behavior: "smooth" }});
+                    return true;
+                }}
+
+                let tries = 0;
+                function run() {{
+                    if (scrollOnce()) {{
+                        win.__dmScrollToken = token;
+                        // Re-settle after the slide-in animation changes height.
+                        setTimeout(scrollOnce, 320);
+                        setTimeout(scrollOnce, 700);
+                    }} else if (tries++ < 30) {{
+                        requestAnimationFrame(run);
+                    }}
+                }}
+                requestAnimationFrame(run);
+            }})();
             </script>
             """,
             height=0,
